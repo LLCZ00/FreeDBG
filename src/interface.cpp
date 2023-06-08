@@ -152,7 +152,7 @@ void DebuggerCLI::loop()
 				if (it == register_map.end()) { logError("Unsupported register: %s\n", command[1].c_str()); }
 				else
 				{
-					try { debugger->writeRegister(it->second, std::stoul(command[2], 0, 16)); }
+					try { debugger->writeRegister(it->second, std::stoul(command[2], 0, 0)); }
 					catch(...)
 					{
 						logError("Invalid value '%s'", command[2].c_str());
