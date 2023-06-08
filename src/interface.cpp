@@ -16,16 +16,30 @@
 #include "logging.hpp" // logError, logMsg
 
 
+
+std::unordered_map<std::string, int> register_map = { // second values from enum in debugger.hpp
+    {"eax", R_EAX},
+    {"ebx", R_EBX},
+    {"ecx", R_ECX},
+    {"edx", R_EDX},
+    {"esi", R_ESI},
+    {"edi", R_EDI},
+    {"ebp", R_EBP},
+    {"eip", R_EIP},
+    {"esp", R_ESP}
+};
+
+
 static const char *HELP[] = { // Update this and add more detail
 	"help(h)",
 	"quit(q)",
 	"clear",
 	"detach",
 	"continue(c)",
-	"breakpoint(break) ADDR [enable|disable]",
+	"breakpoint(break) ADDR [enable|disable|delete]",
 	"step(s)",
-	"set [memory(mem)|register(reg)] TARGET VALUE",
-	"print [memory(mem)|register(reg)]",
+	"write [address|%register] VALUE",
+	"print [memory(mem) ADDR SIZE | registers(regs)]",
 	0
 };
 
@@ -64,11 +78,11 @@ void DebuggerCLI::loop()
 {
 	printf("\n~ FreeDBG Interactive Interface ~\n(Type 'help' for list of commands)");
 	const char *prefix = "\nDBG> ";
-	bool running = true; // Might take this out
 
-	while (running && debugger->isActive())
+	while (debugger->isActive())
 	{
 		printf("%s", prefix);
+		fflush(stdout);
 		Command command;
 		command.getInput();
 		
@@ -76,13 +90,12 @@ void DebuggerCLI::loop()
 		else if (!command[0].compare("q") || !command[0].compare("quit"))
 		{
 			debugger->killProcess();
-			running = false;
+			break;
 		}
 		else if (!command[0].compare("clear")) // Might remove this
 		{
 			std::system("clear");
 		}
-		
 		else if (!command[0].compare("c") || !command[0].compare("continue"))
 		{
 			debugger->continueExec();
@@ -113,6 +126,7 @@ void DebuggerCLI::loop()
 			{
 				if (!command[2].compare("enable")) { debugger->setBreakpoint(address); }
 				else if (!command[2].compare("disable")) { debugger->unsetBreakpoint(address); }
+				else if (!command[2].compare("delete")) { debugger->deleteBreakpoint(address); }
 				else { logError("Invalid breakpoint option '%s'", command[2].c_str()); }
 			}
 			else // Default: Set/enable
@@ -124,25 +138,30 @@ void DebuggerCLI::loop()
 		{
 			debugger->stepInto();
 		}
-		else if (!command[0].compare("set"))
+		else if (!command[0].compare("write"))
 		{
 			if (command.length() < 3)
 			{
-				logError("Command 'set' requires argument (register, memory) and value");
+				logError("Command 'write' requires argument (%register or memory_address) and value");
 				continue;
 			}
 			
-			if (!command[1].compare("reg") || !command[1].compare("register"))
+			if (command[1][0] == '%')
 			{
-				printf("Set register %s=%s\n", command[2].c_str(), command[3].c_str());
-			}
-			else if (!command[1].compare("mem") || !command[1].compare("memory"))
-			{
-				printf("Set memory @0x%s=%s\n", command[2].c_str(), command[3].c_str());
+				auto it = register_map.find(command[1].substr(1));
+				if (it == register_map.end()) { logError("Unsupported register: %s\n", command[1].c_str()); }
+				else
+				{
+					try { debugger->writeRegister(it->second, std::stoul(command[2], 0, 16)); }
+					catch(...)
+					{
+						logError("Invalid value '%s'", command[2].c_str());
+					}
+				}
 			}
 			else
 			{
-				logError("Invalid set target '%s'", command[1].c_str());
+				logError("Invalid write target '%s'", command[1].c_str());
 			}
 		}
 		else if (!command[0].compare("print"))
@@ -206,7 +225,7 @@ void DebuggerCLI::loop()
 		else if (!command[0].compare("detach"))
 		{
 			debugger->detachProcess();
-			running = false;
+			break;
 		}
 		else
 		{

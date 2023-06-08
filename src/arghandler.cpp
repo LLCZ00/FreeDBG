@@ -24,7 +24,7 @@
 
 
 static const char *HELP[] = {
-	"~ FreeDbg v1.0.0, by LLCZ00 ~",
+	"~ FreeDbg v1.1.0, by LLCZ00 ~",
 	"",
 	"Description: A basic (crude) debugger for FreeBSD",
 	"",

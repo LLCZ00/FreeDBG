@@ -15,7 +15,6 @@
 #include "debugger.hpp" // Debugger
 #include "interface.hpp" // DebuggerCLI
 
-#include <cstdio>
 
 int main(int argc, char **argv)
 {
@@ -31,8 +30,8 @@ int main(int argc, char **argv)
 	{
 		if (ptrace(PT_TRACE_ME, 0, 0, 0) < 0)
 		{
-			logError("Failure occured while establishing ptrace");
-			return -1;
+			logError("Error establishing ptrace");
+			return 1;
 		}
 		execv(args.target_elf, args.target_args);
 	}

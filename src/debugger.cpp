@@ -20,6 +20,7 @@
 #include "debugger.hpp" // Debugger, Breakpoint, BYTE, WORD, DWORD, ADDR
 
 // int ptrace(int request, pid_t pid, caddr_t addr, int data);
+// http://fxr.watson.org/fxr/source/sys/signal.h?v=FREEBSD-8-3
 
 
 /***************************
@@ -27,19 +28,13 @@
 ***************************/
 Breakpoint::Breakpoint(int pid, ADDR addr) : child_pid(pid), address(addr) {}
 
-bool Breakpoint::operator== (DWORD addr)
-{
-	if (addr == address) { return true; }
-	return false;
-}
-
 bool Breakpoint::isEnabled() { return enabled; }
 
 ADDR Breakpoint::getAddress() { return address; }
 
 bool Breakpoint::enable()
 {
-	if (enabled) { return false; }
+	if (enabled) { return true; }
 
 	DWORD instructions = ptrace(PT_READ_I, child_pid, (caddr_t)address, 0);
 	if (instructions == -1) { return false; }
@@ -93,20 +88,37 @@ bool Debugger::waitOnChild()
 	}
 	else if (WIFSTOPPED(waitstatus))
 	{
-		logMsg("Process stopped by signal: %d", WSTOPSIG(waitstatus));
+		if (WSTOPSIG(waitstatus) == 11) // Might flesh out later
+		{
+			logError("Process stopped by signal: SIGSEGV (Segmentation fault)");
+			active = false;
+		}
+		else if (WSTOPSIG(waitstatus) == 5) // SIGTRAP (trace trap)
+		{
+			ptrace(PT_GETREGS, child_pid, (caddr_t)&registers, 0);
+			auto it = breakpoints.find(registers.r_eip-1);
+			if (it != breakpoints.end())
+			{
+				if (it->second.isEnabled())
+				{
+					logMsg("Stopped on breakpoint @0x%X", it->first);
+					current_breakpoint = &it->second;
+					current_breakpoint->disable();
+					registers.r_eip--;
+					ptrace(PT_SETREGS, child_pid, (caddr_t)&registers, 0);
+				}
+			}
+		}
 	}
-	return true;
+	return active;
 }
 
 void Debugger::start()
 {
+	active = true;
 	if (!waitOnChild()) { return; }
 	logMsg("Attached to process %d", child_pid);
-
-	// struct reg registers;
-	// ptrace(PT_GETREGS, child_pid, (caddr_t)&registers, 0);
-	// logMsg("Stopped @0x%X", registers.r_eip);
-	active = true;
+	logMsg("Stopped @0x%X", registers.r_eip);
 }
 
 void Debugger::killProcess()
@@ -126,82 +138,169 @@ void Debugger::detachProcess()
 {
 	ptrace(PT_DETACH, child_pid, 0, 0);
 	logMsg("Detached from child process %d", child_pid);
+	active = false;
 }
 
 void Debugger::continueExec()
 {
-	ptrace(PT_CONTINUE, child_pid, 0, 0);
+	if (current_breakpoint != NULL) // Step 1 instruction, re-enable breakpoint, then continue
+	{
+		Breakpoint *bp = current_breakpoint;
+		ptrace(PT_STEP, child_pid, (caddr_t)1, 0);
+		if (!waitOnChild()) { return; }
+		bp->enable();
+
+		if (bp == current_breakpoint) { current_breakpoint = NULL; } // Just return if another breakpoint is immediatly after the last one
+		else { return; }
+	}
+	ptrace(PT_CONTINUE, child_pid, (caddr_t)1, 0);
 	waitOnChild();
 }
 
+
 void Debugger::setBreakpoint(ADDR address)
 {
-	for (Breakpoint &bp : breakpoints)
+	auto it = breakpoints.find(address);
+	if (it != breakpoints.end())
 	{
-		if (bp == address)
-		{
-			if (bp.isEnabled()) { logMsg("Breakpoint @0x%X already enabled", address); }
-			else
-			{
-				if (bp.enable()) { logMsg("Breakpoint @0x%X enabled", address); }
-				else { logError("Unable to enable breakpoint @0x%X", address); }
-			}
-			return;
-		}
-	}
-	Breakpoint breakpoint(child_pid, address);
-	if (breakpoint.enable())
-	{
-		breakpoints.push_back(breakpoint);
-		logMsg("Breakpoint @0x%X set/enabled", address);
+		Breakpoint bp = it->second;
+		if (bp.isEnabled()) { logMsg("Breakpoint @0x%X already enabled", address); }
+		else
+        {
+            if (bp.enable()) { logMsg("Breakpoint @0x%X enabled", address); }
+            else
+            {
+                logError("Unable to enable breakpoint @0x%X (removing from list)", address);
+                breakpoints.erase(address);
+            }
+        }
 	}
 	else
-	{
-		logError("Unable to set breakpoint @0x%X", address);
-	}
+    {
+        Breakpoint bp(child_pid, address);
+        if (bp.enable())
+        {
+            logMsg("Breakpoint @0x%X set/enabled", address);
+            breakpoints.emplace(address, bp);
+        }
+        else { logError("Unable to set breakpoint @0x%X", address); }
+    }
 }
 
 void Debugger::unsetBreakpoint(ADDR address)
 {
-	for (Breakpoint &bp : breakpoints)
+	auto it = breakpoints.find(address);
+	if (it != breakpoints.end())
 	{
-		if (bp == address)
-		{
-			bp.disable();
-			logMsg("Breakpoint @0x%X disabled", address);
-		}
+		it->second.disable();
+		logMsg("Breakpoint @0x%X disabled", address);
+	}
+	else
+	{
+		logError("No breakpoint set @0x%X", address);
 	}
 }
 
-void Debugger::stepInto()
+void Debugger::deleteBreakpoint(ADDR address)
 {
-	ptrace(PT_STEP, child_pid, (caddr_t)1, 0);
-	waitOnChild();
+	if (breakpoints.find(address) != breakpoints.end())
+    {
+        breakpoints.erase(address);
+        logMsg("Breakpoint @0x%X deleted", address);
+    }
+    else { logError("No breakpoint set @0x%X", address); }
 }
 
 void Debugger::listBreakpoints()
 {
-	for (Breakpoint &bp : breakpoints)
+	for (auto &addr_bp: breakpoints)
+    {
+        ADDR address = addr_bp.first;
+        Breakpoint bp = addr_bp.second;
+        printf("Breakpoint @0x%X: ", address);
+        if (bp.isEnabled()) { puts("Enabled"); }
+        else { puts("Disabled"); }
+    }
+}
+
+
+void Debugger::stepInto()
+{
+	if (current_breakpoint != NULL)
 	{
-		printf("Breakpoint @0x%X: ", bp.getAddress());
-		if (bp.isEnabled()) { puts("Enabled"); }
-		else { puts("Disabled"); }
+		Breakpoint *bp = current_breakpoint;
+		ptrace(PT_STEP, child_pid, (caddr_t)1, 0);
+		if (!waitOnChild()) { return; }
+		bp->enable();
+		if (bp == current_breakpoint) { current_breakpoint = NULL; } // Just return if another breakpoint is immediatly after the last one
+		else { return; }
 	}
+	else
+	{
+		ptrace(PT_STEP, child_pid, (caddr_t)1, 0);
+		if (!waitOnChild()) { return; }
+	}
+
+	if (current_breakpoint == NULL) { logMsg("Stopped @0x%X", registers.r_eip); }
+}
+
+void Debugger::writeRegister(int regcode, DWORD value)
+{
+	struct reg regs;
+	ptrace(PT_GETREGS, child_pid, (caddr_t)&regs, 0);
+	switch (regcode)
+	{
+		case R_EAX:
+			regs.r_eax = value;
+			break;
+		case R_EBX:
+			regs.r_ebx = value;
+			break;
+		case R_ECX:
+			regs.r_ecx = value;
+			break;
+		case R_EDX:
+			regs.r_edx = value;
+			break;
+		case R_ESI:
+			regs.r_esi = value;
+			break;
+		case R_EDI:
+			regs.r_edi = value;
+			break;
+		case R_EBP:
+			regs.r_ebp = value;
+			break;
+		case R_EIP:
+			regs.r_eip = value;
+			break;
+		case R_ESP:
+			regs.r_esp = value;
+			break;
+		default:
+			break;
+	}
+	ptrace(PT_SETREGS, child_pid, (caddr_t)&regs, 0);
+}
+
+void Debugger::writeMemory()
+{
+
 }
 
 void Debugger::printRegisters()
 {
-	struct reg registers;
-	ptrace(PT_GETREGS, child_pid, (caddr_t)&registers, 0);
-	printf("EAX: %X\n", registers.r_eax);
-	printf("EBX: %X\n", registers.r_ebx);
-	printf("ECX: %X\n", registers.r_ecx);
-	printf("EDX: %X\n", registers.r_edx);
-	printf("ESI: %X\n", registers.r_esi);
-	printf("EDI: %X\n", registers.r_edi);
-	printf("EBP: %X\n", registers.r_ebp);
-	printf("EIP: %X\n", registers.r_eip);
-	printf("ESP: %X\n", registers.r_esp);
+	struct reg regs;
+	ptrace(PT_GETREGS, child_pid, (caddr_t)&regs, 0);
+	printf("EAX: %X\n", regs.r_eax);
+	printf("EBX: %X\n", regs.r_ebx);
+	printf("ECX: %X\n", regs.r_ecx);
+	printf("EDX: %X\n", regs.r_edx);
+	printf("ESI: %X\n", regs.r_esi);
+	printf("EDI: %X\n", regs.r_edi);
+	printf("EBP: %X\n", regs.r_ebp);
+	printf("EIP: %X\n", regs.r_eip);
+	printf("ESP: %X\n", regs.r_esp);
 }
 
 void Debugger::printMemory(ADDR address, size_t size)
@@ -222,9 +321,9 @@ void Debugger::printMemory(ADDR address, size_t size)
 	int8_t rowlength = 16; // Bytes per line
 	int8_t columnsize = 8; // Where to put space between output in each line
 	uint16_t linenumber = 0;
-	uint8_t ascii_chars[rowlength-1]; // Characters for ascii output after each line
+	uint8_t ascii_chars[rowlength]; // Characters for ascii output after each line
 
-	std::memset(ascii_chars, '.', rowlength-1);
+	std::memset(ascii_chars, '.', rowlength);
 
 	printf("%04X: ", linenumber);
 
@@ -248,7 +347,7 @@ void Debugger::printMemory(ADDR address, size_t size)
 			printf("\t| ");
 
 			// Print ascii representation
-			for (int i = 0; i < rowlength-1; i++)
+			for (int i = 0; i < rowlength; i++)
 			{
 				printf("%c ", ascii_chars[i]);
 			}
@@ -258,7 +357,7 @@ void Debugger::printMemory(ADDR address, size_t size)
 			if (offset + 1 != size)
 			{
 				printf("%04X: ", linenumber + (offset + 1));
-				std::memset(ascii_chars, '.', rowlength-1);
+				std::memset(ascii_chars, '.', rowlength);
 			}			
 		}
 	}

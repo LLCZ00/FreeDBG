@@ -5,9 +5,9 @@
 #ifndef FREEDBG_DEBUGGER
 #define FREEDBG_DEBUGGER
 
-
+#include <machine/reg.h>
+#include <unordered_map>
 #include <cstdint>
-#include <vector>
 #include <cstddef>
 
 #define BYTE uint8_t
@@ -23,6 +23,19 @@ typedef uint32_t DWORD;
 typedef DWORD ADDR;
 
 
+enum {
+    R_EAX = 0,
+    R_EBX,
+    R_ECX,
+    R_EDX,
+    R_ESI,
+    R_EDI,
+    R_EBP,
+    R_EIP,
+    R_ESP
+};
+
+
 class Breakpoint {
 private:
 	int child_pid;
@@ -32,7 +45,6 @@ private:
 
 public:
 	Breakpoint(int pid, ADDR addr);
-	bool operator== (DWORD addr);
 	bool isEnabled();
 	ADDR getAddress();
 	bool enable();
@@ -43,8 +55,10 @@ public:
 class Debugger {
 private:
 	int child_pid;
+	Breakpoint *current_breakpoint = NULL;
 	volatile bool active = false;
-	std::vector<Breakpoint> breakpoints; // Would unordered_map be more efficient?
+	struct reg registers;
+	std::unordered_map<ADDR,Breakpoint> breakpoints;
 	bool waitOnChild();
 
 public:
@@ -54,10 +68,16 @@ public:
 	void killProcess();
 	void detachProcess();
 	void continueExec();
+
 	void setBreakpoint(ADDR address);
 	void unsetBreakpoint(ADDR address);
-	void stepInto();
+	void deleteBreakpoint(ADDR address);
 	void listBreakpoints();
+
+	void stepInto();
+	
+	void writeRegister(int regcode, DWORD value);
+	void writeMemory();
 	void printRegisters();
 	void printMemory(ADDR address, size_t size);
 	
