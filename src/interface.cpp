@@ -26,20 +26,33 @@ std::unordered_map<std::string, int> register_map = { // second values from enum
     {"edi", R_EDI},
     {"ebp", R_EBP},
     {"eip", R_EIP},
-    {"esp", R_ESP}
+    {"esp", R_ESP},
+    {"cflag", R_CARRY},
+    {"zflag", R_ZERO},
+    {"sflag", R_SIGN},
+    {"oflag", R_OVERFLOW}
 };
 
 
 static const char *HELP[] = { // Update this and add more detail
 	"help(h)",
+	"\t - Display this list of commands",
 	"quit(q)",
+	"\t - Kill debugee process and exit FreeDBG",
 	"clear",
+	"\t - Clear terminal screen",
 	"detach",
-	"continue(c)",
+	"\t - Detach from debugee process and exit FreeDBG",
+	"continue/run [to/until ADDR]",
+	"\t - Resume execution of debugee process indefinetly or until specified address",
 	"breakpoint(break) ADDR [enable|disable|delete]",
-	"step(s)",
-	"write [address|%register] VALUE",
-	"print [memory(mem) ADDR SIZE | registers(regs)]",
+	"\t - Set/enable, disable, or delete breakpoint at given address",
+	"step(s) [to/until ADDR]",
+	"\t - Execute one instruction, or until given address",
+	"set %register VALUE",
+	"\t - Assign value to register (preceeded by percent sign)",
+	"print [ADDRESS SIZE | registers(regs)]",
+	"\t - Read/print registers or SIZE bytes of data at given address (Default: 4 bytes)",
 	0
 };
 
@@ -74,7 +87,7 @@ DebuggerCLI::DebuggerCLI(Debugger &dbgr) : debugger(&dbgr)
 }
 
 
-void DebuggerCLI::loop()
+void DebuggerCLI::loop() // Kind of a trainwreck
 {
 	printf("\n~ FreeDBG Interactive Interface ~\n(Type 'help' for list of commands)");
 	const char *prefix = "\nDBG> ";
@@ -96,9 +109,28 @@ void DebuggerCLI::loop()
 		{
 			std::system("clear");
 		}
-		else if (!command[0].compare("c") || !command[0].compare("continue"))
+		else if (!command[0].compare("continue") || !command[0].compare("run"))
 		{
-			debugger->continueExec();
+			if (command.length() > 2)
+			{
+				if (!command[1].compare("to") || !command[1].compare("until"))
+				{
+					try { debugger->stepUntil(std::stoul(command[2], 0, 16)); }
+					catch(...)
+					{
+						logError("Invalid address '%s'", command[1].c_str());
+						continue;
+					}
+				}
+				else
+				{
+					logError("Command 'run until' requires argument 'address'");
+				}
+			}
+			else
+			{
+				debugger->continueExec();
+			}
 		}
 		else if (!command[0].compare("break") || !command[0].compare("breakpoint"))
 		{
@@ -136,13 +168,31 @@ void DebuggerCLI::loop()
 		}
 		else if (!command[0].compare("s") || !command[0].compare("step"))
 		{
-			debugger->stepInto();
+			if (command.length() < 2) { debugger->stepInto(); }
+			else if (!command[1].compare("to") || !command[1].compare("until"))
+			{
+				if (command.length() != 3)
+				{
+					logError("Command 'step until' requires argument 'address'");
+					continue;
+				}
+				try { debugger->stepUntil(std::stoul(command[2], 0, 16)); }
+				catch(...)
+				{
+					logError("Invalid address '%s'", command[1].c_str());
+					continue;
+				}
+			}
+			else
+			{
+				logError("Invalid print target '%s'", command[1].c_str());
+			}
 		}
-		else if (!command[0].compare("write"))
+		else if (!command[0].compare("set"))
 		{
 			if (command.length() < 3)
 			{
-				logError("Command 'write' requires argument (%register or memory_address) and value");
+				logError("Command 'set' requires argument (%register or memory_address) and value");
 				continue;
 			}
 			
@@ -152,7 +202,7 @@ void DebuggerCLI::loop()
 				if (it == register_map.end()) { logError("Unsupported register: %s\n", command[1].c_str()); }
 				else
 				{
-					try { debugger->writeRegister(it->second, std::stoul(command[2], 0, 0)); }
+					try { debugger->writeRegister(it->second, std::stoul(command[2], 0, 16)); }
 					catch(...)
 					{
 						logError("Invalid value '%s'", command[2].c_str());
@@ -161,58 +211,41 @@ void DebuggerCLI::loop()
 			}
 			else
 			{
-				logError("Invalid write target '%s'", command[1].c_str());
+				logError("Invalid 'set' target '%s'", command[1].c_str());
 			}
 		}
 		else if (!command[0].compare("print"))
 		{
 			if (command.length() < 2)
 			{
-				logError("Command 'print' requires argument (registers, memory)");
+				logError("Command 'print' requires argument 'registers' or '0xADDRESS')");
 				continue;
 			}
 			if (!command[1].compare("regs") || !command[1].compare("registers"))
 			{
-				if (command.length() == 3)
-				{
-					printf("Print register '%s'\n", command[2].c_str());
-				}
-				else
-				{
-					debugger->printRegisters();
-				}
+				debugger->printRegisters();
 			}
-			else if (!command[1].compare("mem") || !command[1].compare("memory"))
+			else
 			{
-				if (command.length() < 3)
-				{
-					logError("Command 'print memory' requires argument 'address' and 'size' (optional)");
-					continue;
-				}
-
 				unsigned long address; // Fix this
 				size_t datasize = 4;
-				try { address = std::stoul(command[2], 0, 16); }
+				try { address = std::stoul(command[1], 0, 16); }
 				catch(...)
 				{
-					logError("Invalid address '%s'", command[2].c_str());
+					logError("Invalid address or 'print' target '%s'", command[1].c_str());
 					continue;
 				}
 
-				if (command.length() == 4)
+				if (command.length() == 3)
 				{
-					try { datasize = std::stoi(command[3]); }
+					try { datasize = std::stoi(command[2]); }
 					catch(...)
 					{
-						logError("Invalid size '%s'", command[3].c_str());
+						logError("Invalid size '%s'", command[2].c_str());
 						continue;
 					}
 				}
 				debugger->printMemory(address, datasize);
-			}
-			else
-			{
-				logError("Invalid print target '%s'", command[1].c_str());
 			}
 		}
 		else if (!command[0].compare("h") || !command[0].compare("help"))

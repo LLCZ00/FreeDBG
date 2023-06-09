@@ -32,9 +32,19 @@ enum {
     R_EDI,
     R_EBP,
     R_EIP,
-    R_ESP
+    R_ESP,
+    R_CARRY,
+    R_ZERO,
+    R_SIGN,
+    R_OVERFLOW
 };
 
+enum R_FLAGS {
+    CARRY_FLAG = 1 << 0,
+    ZERO_FLAG = 1 << 6,
+    SIGN_FLAG = 1 << 7,
+    OVERFLOW_FLAG = 1 << 11
+};
 
 class Breakpoint {
 private:
@@ -46,7 +56,6 @@ private:
 public:
 	Breakpoint(int pid, ADDR addr);
 	bool isEnabled();
-	ADDR getAddress();
 	bool enable();
 	void disable();
 };
@@ -75,6 +84,8 @@ public:
 	void listBreakpoints();
 
 	void stepInto();
+	void stepOver();
+	void stepUntil(ADDR address);
 	
 	void writeRegister(int regcode, DWORD value);
 	void writeMemory();

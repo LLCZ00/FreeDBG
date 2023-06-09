@@ -30,8 +30,6 @@ Breakpoint::Breakpoint(int pid, ADDR addr) : child_pid(pid), address(addr) {}
 
 bool Breakpoint::isEnabled() { return enabled; }
 
-ADDR Breakpoint::getAddress() { return address; }
-
 bool Breakpoint::enable()
 {
 	if (enabled) { return true; }
@@ -109,6 +107,10 @@ bool Debugger::waitOnChild()
 				}
 			}
 		}
+		else
+		{
+			logError("Process stopped by signal: %d", WSTOPSIG(waitstatus));
+		}
 	}
 	return active;
 }
@@ -143,15 +145,15 @@ void Debugger::detachProcess()
 
 void Debugger::continueExec()
 {
-	if (current_breakpoint != NULL) // Step 1 instruction, re-enable breakpoint, then continue
+	if (current_breakpoint != NULL) // Step 1 instruction, re-enable breakpoint on previous instruction, then continue
 	{
 		Breakpoint *bp = current_breakpoint;
+		current_breakpoint = NULL;
 		ptrace(PT_STEP, child_pid, (caddr_t)1, 0);
 		if (!waitOnChild()) { return; }
 		bp->enable();
 
-		if (bp == current_breakpoint) { current_breakpoint = NULL; } // Just return if another breakpoint is immediatly after the last one
-		else { return; }
+		if (current_breakpoint != NULL) { return; } // Just return if another breakpoint is immediatly after the last one
 	}
 	ptrace(PT_CONTINUE, child_pid, (caddr_t)1, 0);
 	waitOnChild();
@@ -240,9 +242,39 @@ void Debugger::stepInto()
 		ptrace(PT_STEP, child_pid, (caddr_t)1, 0);
 		if (!waitOnChild()) { return; }
 	}
-
 	if (current_breakpoint == NULL) { logMsg("Stopped @0x%X", registers.r_eip); }
 }
+
+void Debugger::stepOver()
+{
+
+}
+
+void Debugger::stepUntil(ADDR address)
+{
+	auto it = breakpoints.find(address);
+	if (it != breakpoints.end()) // If theres already a breakpoint enabled at that address, just continue
+	{
+		bool previously_disabled = !it->second.isEnabled(); // If breakpoint was disabled, re-enable, then disable again once stopped
+		it->second.enable();
+		continueExec();
+		if (previously_disabled) { it->second.disable(); }
+	}
+	else
+	{
+		Breakpoint bp(child_pid, address); // Enable temporary breakpoint, continue to it, then disable breakpoint
+		bp.enable();
+		continueExec();
+		if (current_breakpoint == NULL) // Since this bp isn't "registered", the IP needs to be rewound if no other breaks were hit along the way
+		{
+			registers.r_eip--;
+			ptrace(PT_SETREGS, child_pid, (caddr_t)&registers, 0);
+			logMsg("Stopped @0x%X", registers.r_eip);
+		}
+		bp.disable();
+	}
+}
+
 
 void Debugger::writeRegister(int regcode, DWORD value)
 {
@@ -277,6 +309,22 @@ void Debugger::writeRegister(int regcode, DWORD value)
 		case R_ESP:
 			regs.r_esp = value;
 			break;
+		case R_CARRY:
+			if (value) { regs.r_eflags |= CARRY_FLAG; } // If given value isn't zero, set flag
+			else { regs.r_eflags &= ~CARRY_FLAG; } // If given value is zero, unset flag
+			break;
+		case R_ZERO:
+			if (value) { regs.r_eflags |= ZERO_FLAG; } 
+			else { regs.r_eflags &= ~ZERO_FLAG; } 
+			break;
+		case R_SIGN:
+			if (value) { regs.r_eflags |= SIGN_FLAG; } 
+			else { regs.r_eflags &= ~SIGN_FLAG; } 
+			break;
+		case R_OVERFLOW:
+			if (value) { regs.r_eflags |= OVERFLOW_FLAG; } 
+			else { regs.r_eflags &= ~OVERFLOW_FLAG; } 
+			break;
 		default:
 			break;
 	}
@@ -301,6 +349,13 @@ void Debugger::printRegisters()
 	printf("EBP: %X\n", regs.r_ebp);
 	printf("EIP: %X\n", regs.r_eip);
 	printf("ESP: %X\n", regs.r_esp);
+	printf("EFLAGS: %X [ ", regs.r_eflags); // Probably more efficient way to do this
+	if (regs.r_eflags & CARRY_FLAG) { printf("CF "); }
+    if (regs.r_eflags & ZERO_FLAG) { printf("ZF "); }
+    if (regs.r_eflags & SIGN_FLAG) { printf("SF "); }
+    if (regs.r_eflags & OVERFLOW_FLAG) { printf("OF "); }
+    puts("]");
+
 }
 
 void Debugger::printMemory(ADDR address, size_t size)
